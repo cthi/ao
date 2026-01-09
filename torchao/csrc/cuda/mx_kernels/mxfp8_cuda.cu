@@ -1,26 +1,33 @@
 // CUDA bridge for MXFP8 quantization
 
 #include "mxfp8_quantize.cuh"
-#include <ATen/cuda/CUDAContext.h>
 #include <string>
-#include <torch/extension.h>
 
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/inductor/aoti_torch/c/shim.h>
+#include <torch/headeronly/core/ScalarType.h>
+#include <torch/headeronly/util/Exception.h>
+
+// Declare the CUDA stream function that's behind #ifdef USE_CUDA in shim.h
+extern "C" AOTITorchError aoti_torch_get_current_cuda_stream(int32_t device_index, void** ret_stream);
+
+using torch::stable::Tensor;
 
 namespace mxfp8 {
 
 // Convert PyTorch scalar type to our DType enum
-DType get_input_dtype(const torch::Tensor &t) {
-  switch (t.scalar_type()) {
-  case torch::kFloat32:
+DType get_input_dtype(const Tensor &t) {
+  auto scalar_type = t.scalar_type();
+  if (scalar_type == torch::headeronly::ScalarType::Float) {
     return DType::kFloat32;
-  case torch::kFloat16:
+  } else if (scalar_type == torch::headeronly::ScalarType::Half) {
     return DType::kFloat16;
-  case torch::kBFloat16:
+  } else if (scalar_type == torch::headeronly::ScalarType::BFloat16) {
     return DType::kBFloat16;
-  case torch::kUInt8:
+  } else if (scalar_type == torch::headeronly::ScalarType::Byte) {
     return DType::kByte;
-  default:
-    TORCH_CHECK(false, "Unsupported input tensor dtype: ", t.scalar_type());
+  } else {
+    STD_TORCH_CHECK(false, "Unsupported input tensor dtype: ", scalar_type);
   }
 }
 
@@ -30,7 +37,7 @@ ScaleCalculationMode get_scaling_mode(const std::string &scaling_mode) {
   } else if (scaling_mode.compare("rceil") == 0) {
       return ScaleCalculationMode::RCEIL;
   } else {
-      TORCH_CHECK(false, "Unsupported scaling mode: ", scaling_mode, ". Only ['floor', 'rceil'] are supported.");
+      STD_TORCH_CHECK(false, "Unsupported scaling mode: ", scaling_mode, ". Only ['floor', 'rceil'] are supported.");
   }
 }
 
@@ -39,16 +46,16 @@ DType get_output_dtype(const std::string &fp8_format) {
   if (fp8_format.compare("e4m3") == 0) {
     return DType::kFloat8E4M3;
   } else {
-    TORCH_CHECK(false, "Unsupported FP8 format: ", fp8_format,
+    STD_TORCH_CHECK(false, "Unsupported FP8 format: ", fp8_format,
                 ". Only 'e4m3' is supported.");
   }
 }
 
-void mxfp8_quantize_cuda(const torch::Tensor &input,
-                         torch::Tensor &output_rowwise,
-                         torch::Tensor &output_colwise,
-                         torch::Tensor &scales_rowwise,
-                         torch::Tensor &scales_colwise,
+void mxfp8_quantize_cuda(const Tensor &input,
+                         Tensor &output_rowwise,
+                         Tensor &output_colwise,
+                         Tensor &scales_rowwise,
+                         Tensor &scales_colwise,
                          int64_t scale_dim_x,
                          int64_t scale_dim_y,
                          const std::string &fp8_format,
@@ -74,7 +81,9 @@ void mxfp8_quantize_cuda(const torch::Tensor &input,
           : nullptr;
 
   // Get CUDA stream
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  void* stream_ptr = nullptr;
+  TORCH_ERROR_CODE_CHECK(aoti_torch_get_current_cuda_stream(input.get_device_index(), &stream_ptr));
+  cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
 
   // Get strides of scale ptrs
   int64_t scale_rowwise_stride_dim0 = scales_rowwise.strides()[0];
@@ -109,9 +118,9 @@ void mxfp8_quantize_cuda(const torch::Tensor &input,
                            stream);
 }
 
-void mxfp8_quantize_3d_cuda(const torch::Tensor &input,
-                             torch::Tensor &output_colwise,
-                             torch::Tensor &scales_colwise,
+void mxfp8_quantize_3d_cuda(const Tensor &input,
+                             Tensor &output_colwise,
+                             Tensor &scales_colwise,
                              int64_t scale_dim_n,
                              const std::string &fp8_format,
                              const std::string &scaling_mode) {
@@ -128,7 +137,9 @@ void mxfp8_quantize_3d_cuda(const torch::Tensor &input,
       reinterpret_cast<e8m0_t *>(scales_colwise.data_ptr());
 
   // Get CUDA stream
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  void* stream_ptr = nullptr;
+  TORCH_ERROR_CODE_CHECK(aoti_torch_get_current_cuda_stream(input.get_device_index(), &stream_ptr));
+  cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
 
   // Get strides of scales tensor
   int64_t scales_colwise_stride_dim0 = scales_colwise.stride(0);
